@@ -1,60 +1,83 @@
-#![no_main]
 #![no_std]
+#![no_main]
 
-use cortex_m_rt::entry;
-use microbit::{
-  board::Board,
-  hal::{prelude::*, timer::Timer},
-};
+use defmt_rtt as _;
 use panic_halt as _;
 
-extern crate alloc;
-use alloc::vec::Vec;
+use cortex_m_rt::entry;
 
-
-use embedded_alloc::Heap;
-
-#[global_allocator]
-static HEAP: Heap = Heap::empty();
+use microbit::{
+    board::Board,
+    display::blocking::Display,
+    hal::{
+        gpio::{Level, OpenDrainConfig},
+        prelude::*,
+        saadc::SaadcConfig,
+        Saadc, Timer,
+    },
+};
 
 #[entry]
 fn main() -> ! {
-{
-  use core::mem::MaybeUninit;
-  const HEAP_SIZE: usize = 8192; // 8KiB
-  static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
-  unsafe { HEAP.init(HEAP_MEM.as_ptr() as usize, HEAP_SIZE) }
-}
-  let mut board = Board::take().expect("Failed to take board");
-  let mut timer = Timer::new(board.TIMER0);
-  let mut row = board.display_pins.row2;
-  let delay = 150u16;
+    if let Some(board) = Board::take() {
+        let mut timer = Timer::new(board.TIMER0);
+        let mut display = Display::new(board.display_pins);
 
-  board.display_pins.col1.set_low().expect("Failed to set col1 low");
-  board.display_pins.col2.set_low().expect("Failed to set col1 low");
+        // initialize adc
+        let saadc_config = SaadcConfig::default();
+        let mut saadc = Saadc::new(board.SAADC, saadc_config);
+        let mut mic_in = board.microphone_pins.mic_in.into_floating_input();
 
-let mut vec = Vec::new();
-vec.push(true);
-vec.push(false);
-vec.push(true);
-vec.push(false);
-vec.push(false);
-vec.push(false);
+        // enable microphone
+        board
+            .microphone_pins
+            .mic_run
+            .into_open_drain_output(OpenDrainConfig::Disconnect0HighDrive1, Level::High);
 
-//vec.iter().cycle().for_each(|v| {
-//	match v {
-//		true => row.set_high().expect("Failed to set row high"),
-///		false => row.set_low().expect("Failed to set row low"),
-//	}
-//	timer.delay_ms(delay);
-//});
+        let mut count: u64 = 0;
+        let mut sum: u64 = 0;
+        let mut max_value: u16 = 0;
+	let mut new_value: u16 = 0;
+	let mut init_value: u16 = 0;
 
-//loop {}
+	let image1 = [ [ 1, 0, 1, 0, 1],
+	[ 1, 0, 1, 0, 1],
+	[ 1, 0, 1, 0, 1],
+	[ 1, 0, 1, 0, 1],
+	[ 1, 0, 1, 0, 1], ];
+	display.show(&mut timer, image1, 100);
 
-  loop {
-    row.set_high().expect("Failed to set row1 high");
-    timer.delay_ms(delay);
-    row.set_low().expect("Failed to set row1 low");
-    timer.delay_ms(delay);
-  }
+init_value = saadc
+.read(&mut mic_in)
+.expect("Error") as u16;
+        loop {
+            let mic_value = saadc
+                .read(&mut mic_in)
+                .expect("could not read value of microphone") as u16;
+
+            // Smoothen the signal as audio comes in waves
+            max_value = max_value.max(mic_value);
+
+            sum += mic_value as u64;
+            count += 1;
+
+            if count % 100 == 0 {
+                let avg = (sum / count) as u16;
+//		init_value = avg;
+		  new_value = max_value;
+
+                let image = [
+                    [if new_value > init_value + 100 { 1 } else { 0 }; 5],
+                    [if new_value >  init_value + 80 { 1 } else { 0 }; 5],
+                    [if new_value >  init_value + 60 { 1 } else { 0 }; 5],
+                    [if new_value >  init_value + 40 { 1 } else { 0 }; 5],
+                    [if new_value >  init_value + 20 { 1 } else { 0 }; 5],
+                ];
+                display.show(&mut timer, image, 10);
+                max_value = 0;
+            }
+        }
+    }
+
+    panic!("End");
 }
